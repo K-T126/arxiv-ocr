@@ -1,8 +1,22 @@
-# arxiv-ocr
+# arxiv-ocr (LLM GraphRAG)
 
 ## プロジェクト概要
 
-arXiv の学術論文から「論文同士の手法の派生関係」や「どのデータセットでどの手法が使われ、どんな性能だったか」といった関係性を抽出し、多段階推論が可能なグラフ RAG（GraphRAG）を構築する。
+arXiv の学術論文の中から **LLM（大規模言語モデル）分野の論文** を対象に、「モデルや手法同士の派生関係（例: LLaMA → Alpaca → Vicuna）」や「どのベンチマークデータセット（MMLU, GSM8K 等）でどんな性能を出したか」という関係性を抽出し、多段階推論が可能なグラフ RAG（GraphRAG）を構築する。
+
+---
+
+## 論文の対象選定方針（アプローチ: arXiv API フィルタリング）
+
+ノイズとなる他分野（画像認識、物理、ロボティクス等）の論文を除外し、**LLM 関連論文のみを確実に収集** するため、arXiv API によるカテゴリおよびキーワード絞り込みを採用する。
+
+* **指定カテゴリ**: `cs.CL`（Computation and Language: 自然言語処理分野）
+* **検索キーワード**: `LLM` OR `"Large Language Model"`
+* **仕組み**: 
+  * Python の `arxiv` クライアント経由で arXiv API を叩き、条件に完全合致する論文のみを自動検索して PDF をダウンロードする。
+  * これにより、論文全文を解析する前にシステム外部で完全に LLM 関連論文のみに限定できる。
+
+---
 
 ## 使用モデル & APIプロバイダー
 
@@ -10,7 +24,7 @@ arXiv の学術論文から「論文同士の手法の派生関係」や「ど�
   * 根拠論文: https://arxiv.org/pdf/2509.25922
   * テキスト読み取り・情報抽出において軽量かつ高精度。
 * **APIプロバイダー**: **OpenRouter**（または OpenAI 互換 API プロバイダー）
-  * **採用理由（長文トークン制限の解決）**: Hugging Face の無料サーバーレス API におけるトークン上限・タイムアウト制限を回避し、Qwen2.5 本来の **128k トークン（長文コンテキスト）** をそのまま活用して論文全文を安定して処理するため。
+  * **採用理由（長文トークン制限の解決）**: Hugging Face 無料サーバーレス API の制限を回避し、Qwen2.5 本来の **128k トークン（長文コンテキスト）** を活用して論文全文を丸ごと安定して処理するため。
   * クライアントには標準の `openai` SDK を使用。
 
 ---
@@ -19,14 +33,14 @@ arXiv の学術論文から「論文同士の手法の派生関係」や「ど�
 
 ```text
 arxiv-ocr/
-├── data/                    # 論文PDFの格納先（ここに直接PDFを配置）
-│   ├── sample_resnet.pdf
+├── data/                    # ダウンロードされた論文PDFの格納先（自動保存）
+│   ├── 2302.13971v1.pdf     # 例: LLaMA論文
 │   └── ...
 ├── arxiv_graph.kuzu/        # KùzuDB（グラフデータベースの格納フォルダ / 自動生成）
 ├── .env                     # APIキー等の環境変数
 ├── .gitignore
 ├── requirements.txt         # 依存ライブラリ一覧
-├── ingest.py                # 論文取り込み & グラフDB登録スクリプト
+├── ingest.py                # arXiv検索・PDF自動取得・要約抽出・グラフDB登録
 ├── query.py                 # 質問回答（グラフRAG検索）スクリプト
 ├── visualize.py             # グラフ可視化スクリプト
 └── README.md
@@ -44,12 +58,13 @@ arxiv-ocr/
    source .venv/bin/activate
    ```
 2. **ライブラリのインストール**:
-   * `openai`: OpenRouter / OpenAI 互換 API 経由で Qwen2.5-72B を呼び出すクライアント。
-   * `pymupdf` (`fitz`): arXiv 論文 PDF から高速・省メモリでテキストを抽出。
+   * `arxiv`: arXiv API を経由して `cs.CL` かつ LLM 関連の論文を検索・PDF 自動取得。
+   * `openai`: OpenRouter 経由で Qwen2.5-72B (128k) を呼び出すクライアント。
+   * `pymupdf` (`fitz`): 論文 PDF から高速・省メモリでテキストを抽出。
    * `pydantic`: 抽出データのスキーマ（型定義）バリデーション。
    * `kuzu`: ローカル組み込み型グラフデータベース（KùzuDB）。
    * `pyvis`: インタラクティブなネットワーク図（HTML）の出力。
-   * `python-dotenv`: `.env` から環境変数を安全に読み込み。
+   * `python-dotenv`: `.env` から環境変数を読み込み。
 3. **環境変数の設定 (`.env`)**:
    ```env
    OPENROUTER_API_KEY="your_openrouter_api_key_here"
@@ -59,42 +74,46 @@ arxiv-ocr/
 
 ### Step 2: 論文の取り込みスクリプト (`ingest.py`)
 
-`data/` 配下に配置された論文 PDF を読み込み、要点を抽出して KùzuDB に保存します。
+LLM 論文を自動検索（または URL/ID 指定）で取得し、要点を抽出して KùzuDB に保存します。
 
-1. **PyMuPDF (`fitz`)**:
-   * `data/*.pdf` から本文テキストを抽出。
-   * （必要に応じて References 以降をカットし、入力効率を最大化）
-2. **Pydantic**:
-   * AI に出力させる JSON 構造のスキーマを定義。
-     * 手法名（`method_name`）
-     * 派生元の親手法（`derived_from`）
-     * 評価データセットとスコア一覧（`evaluations`: `dataset`, `metric`, `score`）
-     * 論文の要約（`summary`）
-3. **OpenRouter (`openai` SDK) + `Qwen/Qwen2.5-72B-Instruct`**:
-   * 128k コンテキストを活かして論文テキストを丸ごと送信し、Pydantic スキーマに沿った JSON を構造化出力。
-4. **KùzuDB (`kuzu`)**:
-   * グラフ DB に以下のノードとリレーションを作成・書き込み。
-     * **ノード**: `Method`（手法）、`Dataset`（データセット）
-     * **リレーション**: `(:Method)-[:DERIVED_FROM]->(:Method)`, `(:Method)-[:EVALUATED_ON {metric, score}]->(:Dataset)`
+1. **arXiv API 検索 & PDF ダウンロード (`arxiv`)**:
+   * 検索クエリ `cat:cs.CL AND (LLM OR "Large Language Model")` に基づき、指定件数（例: 最新 5 件）の論文メタデータと PDF を `data/` に自動ダウンロード。
+   * （URL や arXiv ID を直接指定してダウンロード・取り込みすることも可能）
+2. **PyMuPDF (`fitz`)**:
+   * ダウンロードした PDF から本文テキストを抽出。
+3. **Pydantic スキーマ定義 (LLM 特化)**:
+   * 手法/モデル名（`model_name`: 例: "Alpaca"）
+   * ベースモデル・親手法（`base_model` / `derived_from`: 例: "LLaMA-7B"）
+   * チューニング/手法分類（`method_type`: 例: "Instruction Tuning", "RLHF", "DPO"）
+   * 評価ベンチマークとスコア（`evaluations`: `benchmark`（例: "MMLU", "GSM8K"）, `score`）
+   * 概要（`summary`）
+4. **OpenRouter (`openai` SDK) + `Qwen/Qwen2.5-72B-Instruct`**:
+   * 128k コンテキストで論文テキストを送信し、上記の Pydantic スキーマに沿った JSON を構造化出力。
+5. **KùzuDB (`kuzu`)**:
+   * 以下のノードとリレーションをローカル DB に書き込み。
+     * **ノード**: `Model`（LLM名）, `Benchmark`（評価データセット）
+     * **リレーション**: 
+       * `(:Model)-[:DERIVED_FROM]->(:Model)`
+       * `(:Model)-[:EVALUATED_ON {score, metric}]->(:Benchmark)`
 
 ---
 
 ### Step 3: 質問回答スクリプト (`query.py`)
 
-「ResNet から派生した手法と、その性能を教えて」といった自然言語の質問に対して、グラフデータを活用して回答します。
+「LLaMA から派生した指示チューニングモデルと、それぞれの GSM8K のスコアを教えて」といった質問に答えます。
 
 1. **KùzuDB (`kuzu`)**:
-   * 質問に含まれるキーワードをもとに Cypher クエリを実行し、該当手法から伸びる派生関係や評価スコアのサブグラフ（関連データ）を取り出す。
+   * 質問キーワード（例: LLaMA）から Cypher クエリを実行し、派生ツリーやベンチマークスコアのサブグラフを取得。
 2. **OpenRouter (`openai` SDK) + `Qwen/Qwen2.5-72B-Instruct`**:
-   * KùzuDB から取り出した「つながりのデータ」をプロンプトにコンテキストとして埋め込み、「このデータをもとに、ユーザーの質問にわかりやすく日本語で答えてください」と指示して回答を生成。
+   * 取得したグラフ構造データをプロンプトにコンテキストとして埋め込み、日本語でわかりやすく回答を生成。
 
 ---
 
 ### Step 4: グラフ可視化スクリプト (`visualize.py`)
 
-蓄積された論文・手法の家系図をブラウザでインタラクティブに確認します。
+蓄積された LLM の系譜図（モデルの家系図とベンチマーク比較）をブラウザ上でインタラクティブに確認します。
 
 1. **KùzuDB (`kuzu`)**:
-   * 保存されているすべての `Method` ノードと `DERIVED_FROM` などのリレーションを全件取得。
+   * 保存されているすべての `Model` ノードと `DERIVED_FROM`, `EVALUATED_ON` などのリレーションを取得。
 2. **PyVis (`pyvis`)**:
-   * 取得したノードとエッジを、ドラッグ＆ドロップで動かせるインタラクティブな HTML 図（`graph.html`）に変換して出力。
+   * インタラクティブな HTML 図（`graph.html`）を生成して保存。ドラッグ＆ドロップでモデル同士の派生関係やつながりを視覚的に探索可能。
