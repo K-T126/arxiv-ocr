@@ -117,3 +117,53 @@ LLM 論文を自動検索（または URL/ID 指定）で取得し、要点を�
    * 保存されているすべての `Model` ノードと `DERIVED_FROM`, `EVALUATED_ON` などのリレーションを取得。
 2. **PyVis (`pyvis`)**:
    * インタラクティブな HTML 図（`graph.html`）を生成して保存。ドラッグ＆ドロップでモデル同士の派生関係やつながりを視覚的に探索可能。
+
+---
+
+## 主な使い方
+
+仮想環境を有効化した状態で実行します:
+
+```bash
+source .venv/bin/activate
+```
+
+### 1. 論文の自動取り込み (`ingest.py`)
+
+`cs.CL` カテゴリかつ LLM 関連の最新論文を自動検索・ダウンロードし、Qwen2.5-72B で要点・ベンチマークを抽出して KùzuDB に格納します。
+
+```bash
+# 最新の LLM 論文を 5 件検索して自動取得・DB 登録
+python3 ingest.py --max-results 5
+
+# 特定の arXiv ID またはローカル PDF を取り込む場合
+python3 ingest.py --arxiv-id 2302.13971
+python3 ingest.py --pdf ./data/example.pdf
+
+# （API を呼ばずに PDF 取得とテキスト抽出のみ動作確認したい場合）
+python3 ingest.py --dry-run --max-results 1
+```
+
+### 2. ナレッジグラフへの質問回答 (`query.py`)
+
+KùzuDB からモデルの派生関係やベンチマーク結果を読み出し、Qwen2.5-72B を使って質問に回答します。
+
+```bash
+# コマンドラインから直接質問（単発実行）
+python3 query.py "LLaMAから派生したモデルとそれぞれのGSM8Kのスコアを教えて"
+
+# 対話モードの起動
+python3 query.py
+
+# （LLM を呼ばずにローカルのグラフ検索結果のみを確認したい場合）
+python3 query.py "LLaMA" --no-llm
+```
+
+### 3. グラフの可視化 (`visualize.py`)
+
+蓄積されたナレッジグラフからインタラクティブな HTML ネットワーク図を出力します。
+
+```bash
+python3 visualize.py
+# -> カレントディレクトリに graph.html が生成され、ブラウザで探索可能です
+```
